@@ -124,6 +124,15 @@
   .out a { color: var(--accent); font-size: 12px; }
   .grid { overflow: auto; max-height: 120px; }
   .out.fill .grid { flex: 1; max-height: none; min-height: 0; }
+  /* Always-visible scrollbars: macOS otherwise hides them until you scroll. Styling the
+     WebKit scrollbar turns off the overlay kind; Firefox gets the standard properties
+     (set only there, since in Chrome they would override the WebKit styling). */
+  .grid::-webkit-scrollbar { width: 10px; height: 10px; }
+  .grid::-webkit-scrollbar-track { background: var(--stmt-bg); }
+  .grid::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 5px; border: 2px solid var(--stmt-bg); }
+  .grid::-webkit-scrollbar-thumb:hover { background: var(--fg); }
+  .grid::-webkit-scrollbar-corner { background: var(--stmt-bg); }
+  @supports not selector(::-webkit-scrollbar) { .grid { scrollbar-color: var(--muted) var(--stmt-bg); } }
   /* With no rows yet, the grid is just its header: it must not stretch, or it pushes the
      waiting indicator or "no rows" below the bottom of the panel. */
   .out.fill .grid.no-rows { flex: none; }
@@ -421,10 +430,10 @@ function apply(p, rows) {
 
 function render(p) {
   const body = p.el.querySelector(".body");
-  // An empty page of results while still running changes nothing on screen: skip it, so
-  // the waiting indicator is not torn down and rebuilt on every poll.
-  const shape = `${p.live}|${p.rows.length}|${p.columns.join()}`;
-  if (p.live && !p.rows.length && p.shape === shape) return;
+  // A poll that changed nothing changes nothing on screen: skip it, so the waiting
+  // indicator is not torn down and rebuilt, and a scrollbar drag is not interrupted.
+  const shape = `${p.live}|${p.rows.length}|${p.changes}|${p.columns.join()}`;
+  if (p.shape === shape) return;
   p.shape = shape;
   if (!p.columns.length) {
     // A result with no rows can arrive without its column names, too.
@@ -441,8 +450,12 @@ function render(p) {
   for (const c of p.columns) { const th = document.createElement("th"); th.textContent = c; hr.appendChild(th); }
   const tb = table.createTBody();
   for (const row of p.rows) { const tr = tb.insertRow(); row.forEach((v, i) => tr.appendChild(cell(v, p.columns[i]))); }
-  const grid = document.createElement("div"); grid.className = p.rows.length ? "grid" : "grid no-rows"; grid.appendChild(table);
-  body.replaceChildren(grid);
+  // The grid is the scroll container: keep the same element across renders and swap only
+  // the table inside, so its scroll position and an in-progress scrollbar drag survive.
+  const grid = p.grid || (p.grid = document.createElement("div"));
+  grid.className = p.rows.length ? "grid" : "grid no-rows";
+  grid.replaceChildren(table);
+  if (body.firstChild !== grid || body.childNodes.length !== 1) body.replaceChildren(grid);
   if (!p.rows.length) {
     if (p.live) body.append(p.waitEl);
     else body.insertAdjacentHTML("beforeend", `<div class="empty">no rows</div>`);

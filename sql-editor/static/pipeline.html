@@ -287,6 +287,15 @@
   .res.done .rstate { color: var(--ok); } .res.fail .rstate { color: var(--err); }
   .res .rstate a { color: var(--accent); margin-right: 6px; }
   .res .grid { max-height: 280px; overflow: auto; }
+  /* Always-visible scrollbars: macOS otherwise hides them until you scroll. Styling the
+     WebKit scrollbar turns off the overlay kind; Firefox gets the standard properties
+     (set only there, since in Chrome they would override the WebKit styling). */
+  .res .grid::-webkit-scrollbar { width: 10px; height: 10px; }
+  .res .grid::-webkit-scrollbar-track { background: var(--stmt-bg); }
+  .res .grid::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 5px; border: 2px solid var(--stmt-bg); }
+  .res .grid::-webkit-scrollbar-thumb:hover { background: var(--fg); }
+  .res .grid::-webkit-scrollbar-corner { background: var(--stmt-bg); }
+  @supports not selector(::-webkit-scrollbar) { .res .grid { scrollbar-color: var(--muted) var(--stmt-bg); } }
   .res table { border-collapse: collapse; font: 12px var(--mono); width: max-content; min-width: 100%; }
   .res th, .res td { padding: 3px 10px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
   .res th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 600; }
@@ -920,7 +929,8 @@ async function runOne(stmt, token) {
           } else rows.push(x.fields);
         }
         if (rows.length > MAX_ROWS) rows.splice(0, rows.length - MAX_ROWS);
-        if (rows.length) render(body, columns, rows);
+        // An empty page changes nothing: skip it, so a scrollbar drag is not interrupted.
+        if (rows.length && r.rows.length) render(body, columns, rows);
         state.lastChild.textContent = `running · ${rows.length} rows`;
       }
       if (r.type === "EOS" || r.next === null) break;
@@ -936,10 +946,13 @@ async function runOne(stmt, token) {
 }
 
 // In the query's own order. A live stream appends at the bottom, so the grid follows it
-// down — unless the reader has scrolled up to look at something.
+// down — unless the reader has scrolled up to look at something, or is holding the
+// scrollbar. The grid is the scroll container, so it is kept across renders and only its
+// table is swapped: a new element would drop the drag and reset both scroll positions.
 function render(body, columns, rows) {
-  const old = body.querySelector(".grid");
-  const follow = !old || old.scrollTop + old.clientHeight >= old.scrollHeight - 8;
+  let grid = body.querySelector(".grid");
+  const fresh = !grid;
+  const follow = fresh || (!grid.held && grid.scrollTop + grid.clientHeight >= grid.scrollHeight - 8);
   const t = document.createElement("table");
   const hr = t.createTHead().insertRow();
   for (const c of columns) { const th = document.createElement("th"); th.textContent = c; hr.append(th); }
@@ -952,10 +965,18 @@ function render(body, columns, rows) {
       else td.textContent = typeof v === "object" ? JSON.stringify(v) : String(v);
     }
   }
-  const grid = document.createElement("div"); grid.className = "grid"; grid.append(t);
-  body.replaceChildren(grid);
-  grid.scrollTop = follow ? grid.scrollHeight : old.scrollTop;
+  if (fresh) {
+    grid = document.createElement("div"); grid.className = "grid";
+    grid.addEventListener("pointerdown", () => { grid.held = true; });
+    body.replaceChildren(grid);
+  }
+  const { scrollTop, scrollLeft } = grid;
+  grid.replaceChildren(t);
+  grid.scrollLeft = scrollLeft;
+  grid.scrollTop = follow ? grid.scrollHeight : scrollTop;
 }
+// Released anywhere, even outside the grid where a scrollbar drag often ends.
+document.addEventListener("pointerup", () => { for (const g of document.querySelectorAll(".res .grid")) g.held = false; }, true);
 
 // ── Pan and zoom ─────────────────────────────────────────────────────────────
 // The view is a centre point in diagram units and a zoom factor relative to "fit"; the
