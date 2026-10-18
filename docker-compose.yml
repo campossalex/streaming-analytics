@@ -1,0 +1,441 @@
+name: coffee-shop-oss
+
+# Coffee shop scenario on open-source Apache Flink. Everything runs in Docker Compose.
+#
+# The LLM step uses Flink's NATIVE AI functions (CREATE MODEL + ML_PREDICT), which
+# arrived in Apache Flink 2.x — hence the 2.3.0 runtime here rather than 1.20.
+#
+# Prerequisites:
+#   1. cp .env.example .env  and fill in OPENAI_API_KEY
+#   2. ./download-jars.sh once, to populate ./lib/ with connector JARs
+#   3. ./start.sh  (docker compose up -d, then submits the two Flink jobs)
+#
+# Ports exposed to the host:
+#   80    — Environment homepage (start here; links to everything below)
+#   8081  — Flink Web UI
+#   8082  — Redpanda Console
+#   19092 — Redpanda Kafka (external listener; redpanda:9092 inside the network)
+#   5432  — PostgreSQL (sales_report: the reports; warehouse: master_product)
+#   3000  — Grafana
+#   8083  — Flink SQL Gateway (REST)
+#   8084  — Web SQL editor (in front of the SQL Gateway); Pipeline Builder at /pipeline
+
+services:
+
+  # ── Redpanda (Kafka-compatible broker) ───────────────────────────────────────
+
+  redpanda:
+    image: redpandadata/redpanda:v24.3.7
+    hostname: redpanda
+    command:
+      - redpanda
+      - start
+      - --node-id=0
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --rpc-addr=redpanda:33145
+      - --advertise-rpc-addr=redpanda:33145
+      - --smp=1
+      - --memory=1G
+      - --mode=dev-container
+      - --default-log-level=warn
+    ports:
+      - "19092:19092"
+    networks:
+      - flink-net
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "info"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  redpanda-init:
+    image: redpandadata/redpanda:v24.3.7
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        rpk topic create store.purchases store.inventories store.feedback
+        --brokers redpanda:9092 --partitions 4
+        && echo 'Kafka topics created.'
+    networks:
+      - flink-net
+
+  redpanda-console:
+    image: redpandadata/console:v2.7.2
+    hostname: redpanda-console
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    ports:
+      - "8082:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks:
+      - flink-net
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  # Two databases: sales_report (purchase_report + feedback_summary, what the jobs
+  # write) and warehouse (master_product, the product dimension the sales job reads).
+  # wal_level=logical is what lets postgres-cdc stream master_product's changes; the
+  # slot and sender limits leave room for the job plus a few interactive CDC queries.
+
+  postgres:
+    image: postgres:15
+    hostname: postgres
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=10
+      - -c
+      - max_wal_senders=10
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: admin1
+      POSTGRES_DB: sales_report
+      TZ: UTC
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./pg_sales_report_ddl.sql:/docker-entrypoint-initdb.d/01_sales_report.sql:ro
+      - ./pg_feedback_ddl.sql:/docker-entrypoint-initdb.d/02_feedback.sql:ro
+      - ./pg_warehouse_ddl.sql:/docker-entrypoint-initdb.d/03_warehouse.sql:ro
+    networks:
+      - flink-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U root -d sales_report"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Flink session cluster ────────────────────────────────────────────────────
+  # lib/ is mounted from the host — run ./download-jars.sh first. The entrypoints copy
+  # the JARs into /opt/flink/lib/ because the mount is read-only.
+
+  jobmanager:
+    image: flink:2.3.0-java17
+    hostname: jobmanager
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - "cp /opt/flink/lib/extra/*.jar /opt/flink/lib/ 2>/dev/null || true; /docker-entrypoint.sh jobmanager"
+    environment:
+      TZ: UTC
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 8
+        parallelism.default: 1
+        # transaction_time and event_time are naive strings produced by the generators
+        # under TZ=UTC. Pinning the planner to UTC keeps them aligned with PROCTIME()
+        # and with Grafana's time filters.
+        table.local-time-zone: UTC
+        rest.port: 8081
+        rest.address: 0.0.0.0
+        # Flink 2.x key names: `state.backend: filesystem` and `state.checkpoints.dir`
+        # are 1.x spellings. The old backend key still parses but resolves as a factory
+        # class name, so job submission dies with ClassNotFoundException: filesystem.
+        state.backend.type: hashmap
+        execution.checkpointing.dir: file:///tmp/flink-checkpoints
+        execution.checkpointing.interval: 60s
+        # Async model inference. Without this the ML_PREDICT call is synchronous at
+        # parallelism 1: one HTTP round-trip per review, in series. The generator makes
+        # a bad review every ~30s so even 1 would keep up here, but a burst or a slow
+        # endpoint would build a backlog that never drains.
+        table.exec.async-ml-predict.max-concurrent-operations: 4
+        table.exec.async-ml-predict.timeout: 180s
+        # Reviews are independent and the sink upserts on review_id, so there is nothing
+        # to gain from making a slow call hold up the ones behind it.
+        table.exec.async-ml-predict.output-mode: ALLOW_UNORDERED
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./lib:/opt/flink/lib/extra:ro
+      # Checkpoint state is written by the TaskManager and its metadata by the
+      # JobManager, so file:// checkpointing only works if both see one filesystem.
+      - flink-checkpoints:/tmp/flink-checkpoints
+    networks:
+      - flink-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://jobmanager:8081/overview"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+  taskmanager:
+    image: flink:2.3.0-java17
+    hostname: taskmanager
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - "cp /opt/flink/lib/extra/*.jar /opt/flink/lib/ 2>/dev/null || true; /docker-entrypoint.sh taskmanager"
+    environment:
+      TZ: UTC
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 8
+        parallelism.default: 1
+        table.local-time-zone: UTC
+        taskmanager.memory.process.size: 2g
+        state.backend.type: hashmap
+        execution.checkpointing.dir: file:///tmp/flink-checkpoints
+        table.exec.async-ml-predict.max-concurrent-operations: 4
+        table.exec.async-ml-predict.timeout: 180s
+        table.exec.async-ml-predict.output-mode: ALLOW_UNORDERED
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+    volumes:
+      - ./lib:/opt/flink/lib/extra:ro
+      - flink-checkpoints:/tmp/flink-checkpoints
+    networks:
+      - flink-net
+
+  # A fresh named volume is created root-owned unless the image already has content at
+  # the mount point, and the Flink image runs as uid 9999 (flink). Without this one-shot
+  # chown, the first CREATE CATALOG dies with
+  #   java.io.FileNotFoundException: /opt/flink/catalog-store/dwh.yaml (Permission denied)
+  # This runs as root so the client itself does not have to.
+  catalog-store-init:
+    image: flink:2.3.0-java17
+    user: root
+    entrypoint: ["/bin/sh", "-c", "chown 9999:9999 /opt/flink/catalog-store && echo 'catalog store ready.'"]
+    volumes:
+      - catalog-store:/opt/flink/catalog-store
+    networks:
+      - flink-net
+
+  # The SQL client container. It idles so we can `docker compose exec` into it; because
+  # it never runs /docker-entrypoint.sh, FLINK_PROPERTIES would be ignored, so the
+  # cluster address is appended to config.yaml directly. Without it the client falls
+  # back to the image default rest.address 0.0.0.0 and submission fails with
+  # "Connection refused: /0.0.0.0:8081".
+  #
+  # The OPENAI_* values reach CREATE MODEL through envsubst in submit.sh — they are
+  # never written into a SQL file on disk.
+  sql-client:
+    image: flink:2.3.0-java17
+    hostname: sql-client
+    environment:
+      TZ: UTC
+      KAFKA_BOOTSTRAP: redpanda:9092
+      PG_URL: jdbc:postgresql://postgres:5432/sales_report
+      PG_USER: root
+      PG_PASSWORD: admin1
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        cp /opt/flink/lib/extra/*.jar /opt/flink/lib/ 2>/dev/null || true
+        grep -q '^rest.address: jobmanager' /opt/flink/conf/config.yaml || \
+          printf '\njobmanager.rpc.address: jobmanager\nrest.address: jobmanager\nrest.port: 8081\ntable.local-time-zone: UTC\ntable.catalog-store.kind: file\ntable.catalog-store.file.path: /opt/flink/catalog-store\n' \
+            >> /opt/flink/conf/config.yaml
+        sleep infinity
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+      catalog-store-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./lib:/opt/flink/lib/extra:ro
+      - ./flink_sql:/opt/sql:ro
+      - ./submit.sh:/opt/submit.sh:ro
+      # CatalogStore. It persists CATALOG REGISTRATIONS — the `CREATE CATALOG dwh`
+      # configuration — not tables: a table is stored inside its catalog, and the
+      # default catalog is in-memory. So `dwh` survives a session and `SHOW TABLES`
+      # is still empty. See README.md → "What survives a session".
+      #
+      # Only this container and sql-gateway need it: the store is read by the
+      # TableEnvironment that parses SQL, and a submitted job has already resolved
+      # its tables.
+      #
+      # Named volume, so registrations outlive `docker compose down` — but NOT
+      # `down -v`, which wipes it along with the databases.
+      - catalog-store:/opt/flink/catalog-store
+    networks:
+      - flink-net
+
+  # ── Web SQL editor ───────────────────────────────────────────────────────────
+  # The SQL Gateway is the same SQL engine the SQL client embeds, exposed as a REST
+  # API: sessions, statements, paged results. It has no UI and sends no CORS headers,
+  # so the browser talks to sql-editor, which proxies to it.
+  #
+  # Like sql-client, it bypasses /docker-entrypoint.sh, so the cluster address and the
+  # CatalogStore are appended to config.yaml directly.
+  #
+  # idle-timeout=0 means sessions never expire. Everything an attendee creates lives in
+  # the session's in-memory catalog, so the 10-minute default would silently drop their
+  # tables over a coffee break. One environment per attendee, so nothing piles up.
+
+  sql-gateway:
+    image: flink:2.3.0-java17
+    hostname: sql-gateway
+    environment:
+      TZ: UTC
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        cp /opt/flink/lib/extra/*.jar /opt/flink/lib/ 2>/dev/null || true
+        grep -q '^rest.address: jobmanager' /opt/flink/conf/config.yaml || \
+          printf '\njobmanager.rpc.address: jobmanager\nrest.address: jobmanager\nrest.port: 8081\nexecution.target: remote\ntable.local-time-zone: UTC\ntable.catalog-store.kind: file\ntable.catalog-store.file.path: /opt/flink/catalog-store\n' \
+            >> /opt/flink/conf/config.yaml
+        exec /opt/flink/bin/sql-gateway.sh start-foreground \
+          -Dsql-gateway.endpoint.rest.address=0.0.0.0 \
+          -Dsql-gateway.endpoint.rest.port=8083 \
+          -Dsql-gateway.session.idle-timeout=0
+    ports:
+      - "8083:8083"
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+      catalog-store-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./lib:/opt/flink/lib/extra:ro
+      - catalog-store:/opt/flink/catalog-store
+    networks:
+      - flink-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/v1/info"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+
+  # A one-page editor. The browser keeps one gateway session and reconnects to it after a
+  # reload, so the DDL an attendee ran is still there. Placeholders like
+  # ${OPENAI_API_KEY} in a statement are filled in here from the env below, so, as with
+  # submit.sh, the key is never written to a file and never reaches the browser.
+  #
+  # It also serves the Pipeline Builder at /pipeline: the architecture diagram as buttons that
+  # create each table, deploy each job and show what runs, read from the JobManager (FLINK_URL).
+  #
+  # PRELOAD_DDL=true runs flink_sql/ddl/*.sql into each new session first, like
+  # `sql-client.sh -i`. Off by default, because attendees issue the DDL themselves.
+  sql-editor:
+    image: python:3.11-slim
+    hostname: sql-editor
+    environment:
+      TZ: UTC
+      GATEWAY_URL: http://sql-gateway:8083
+      FLINK_URL: http://jobmanager:8081
+      PRELOAD_DDL: "${PRELOAD_DDL:-false}"
+      KAFKA_BOOTSTRAP: redpanda:9092
+      PG_URL: jdbc:postgresql://postgres:5432/sales_report
+      PG_USER: root
+      PG_PASSWORD: admin1
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+    depends_on:
+      sql-gateway:
+        condition: service_healthy
+    volumes:
+      - ./sql-editor:/app:ro
+      - ./flink_sql:/opt/sql:ro
+    working_dir: /app
+    command: >
+      bash -c "pip install -r requirements.txt -q && python3 app.py"
+    ports:
+      - "8084:8084"
+    networks:
+      - flink-net
+    restart: on-failure
+
+  # ── Environment homepage ─────────────────────────────────────────────────────
+  # One static page on port 80 with a card per web UI — each link built from the host the
+  # page was opened on, and a live reachability dot — plus the architecture diagram and the
+  # connection details. Pure static files; nothing is proxied, so every UI keeps its own
+  # port. Same page structure and tokens as scenarios/lakehouse_oss/homepage.
+  homepage:
+    image: nginx:1.27-alpine
+    hostname: homepage
+    volumes:
+      - ./homepage:/usr/share/nginx/html:ro
+    ports:
+      - "80:80"
+    networks:
+      - flink-net
+    restart: unless-stopped
+
+  # ── Data generators ──────────────────────────────────────────────────────────
+
+  purchases-gen:
+    image: python:3.11-slim
+    environment:
+      # Pin UTC: transaction_time is a naive string from datetime.now(), so the
+      # container's zone silently defines what it means.
+      TZ: UTC
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    volumes:
+      - ./datagen:/app:ro
+    working_dir: /app
+    command: >
+      bash -c "pip install -r requirements.txt -q && python3 purchases.py"
+    networks:
+      - flink-net
+    restart: on-failure
+
+  feedback-gen:
+    image: python:3.11-slim
+    environment:
+      TZ: UTC
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    volumes:
+      - ./datagen:/app:ro
+    working_dir: /app
+    command: >
+      bash -c "pip install -r requirements.txt -q && python3 feedback.py"
+    networks:
+      - flink-net
+    restart: on-failure
+
+  # ── Grafana ──────────────────────────────────────────────────────────────────
+  # Datasource and dashboards are provisioned, so there is nothing to click.
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    hostname: grafana
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      # The feedback dashboard's "Improvement Keywords" panel is a word cloud, which is
+      # not a core Grafana visualization. Grafana installs it from the plugin catalog on
+      # first boot; without it that panel renders as "Panel plugin not found" while every
+      # other panel works.
+      GF_INSTALL_PLUGINS: "magnesium-wordcloud-panel"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - flink-net
+
+networks:
+  flink-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  flink-checkpoints:
+  catalog-store:

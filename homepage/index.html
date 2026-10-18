@@ -1,0 +1,636 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coffee Shop Lab</title>
+<script>
+  // Before the stylesheet, so a saved theme applies on first paint.
+  try {
+    const t = localStorage.getItem("home.theme");
+    if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  } catch {}
+</script>
+<style>
+  /* Same tokens as the lakehouse_oss homepage, so the labs read as one family of
+     environments. */
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --fg: #1d2330; --muted: #667085; --border: #d9dde4;
+    --accent: #e6526f; --accent-fg: #fff; --err: #b42335; --ok: #1f7a4d; --tint: #eef0f6;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12151b; --panel: #1b1f27; --fg: #e3e6ec; --muted: #9098a8; --border: #2e3440;
+      --accent: #f06a84; --accent-fg: #fff; --err: #ff8a9b; --ok: #5fd39b; --tint: #232834;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12151b; --panel: #1b1f27; --fg: #e3e6ec; --muted: #9098a8; --border: #2e3440;
+    --accent: #f06a84; --accent-fg: #fff; --err: #ff8a9b; --ok: #5fd39b; --tint: #232834;
+    color-scheme: dark;
+  }
+  :root[data-theme="light"] { color-scheme: light; }
+
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 24px;
+           border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 { font-size: 16px; margin: 0; }
+  header .spacer { flex: 1; }
+  #theme { width: 32px; height: 32px; padding: 0; font-size: 16px; line-height: 1; cursor: pointer;
+           border-radius: 6px; border: 1px solid var(--border); background: var(--panel); color: var(--fg); }
+  main { max-width: 1120px; margin: 0 auto; padding: 32px 24px 48px; }
+
+  .intro h2 { font-size: 28px; line-height: 1.2; margin: 0 0 8px; letter-spacing: -0.01em; }
+  .intro p { margin: 0; color: var(--muted); max-width: 70ch; }
+  /* The architecture diagram. Page CSS styles the inline SVG through classes, so it
+     follows the theme tokens; only the model call wears the accent. */
+  .arch { margin: 20px 0 0; padding: 16px 16px 10px; background: var(--panel);
+          border: 1px solid var(--border); border-radius: 8px; }
+  .arch .scroll { overflow-x: auto; }
+  .arch svg { display: block; width: 100%; min-width: 760px; height: auto; color: var(--muted);
+              font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .arch .box { fill: var(--bg); stroke: var(--border); stroke-width: 1.5; }
+  .arch .region { fill: none; stroke: var(--border); stroke-width: 1.5; stroke-dasharray: 5 4; }
+  .arch .title { fill: var(--fg); font-size: 13px; font-weight: 600; }
+  .arch .sub { fill: var(--muted); font-size: 11px; font-family: var(--mono); }
+  .arch .region-label { fill: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .06em; }
+  .arch .edge { fill: none; stroke: var(--muted); stroke-width: 1.5; }
+  .arch .edge-label { fill: var(--muted); font-size: 11px; font-family: var(--mono); }
+  .arch .hot { stroke: var(--accent); stroke-width: 2; }
+  .arch .hot-box { stroke: var(--accent); stroke-width: 2; }
+  .arch .hot-label { fill: var(--accent); }
+  .arch .head { fill: var(--muted); }
+  .arch .head-hot { fill: var(--accent); }
+  /* Table boxes are clickable: an (i) badge in the corner, and the whole box as the hit
+     target. The hit rect is transparent but painted, so it receives the pointer. */
+  .arch .tbl { cursor: pointer; outline: none; }
+  .arch .tbl .hit { fill: transparent; stroke: transparent; stroke-width: 2; }
+  .arch .tbl:hover .hit, .arch .tbl:focus-visible .hit { stroke: var(--accent); }
+  .arch .badge circle { fill: var(--panel); stroke: var(--muted); stroke-width: 1.4; }
+  .arch .badge text { fill: var(--fg); font: italic 700 11px Georgia, serif; }
+  .arch .tbl:hover .badge circle, .arch .tbl:focus-visible .badge circle { stroke: var(--accent); fill: var(--accent); }
+  .arch .tbl:hover .badge text, .arch .tbl:focus-visible .badge text { fill: var(--accent-fg); }
+  .arch figcaption { margin-top: 8px; font-size: 13px; color: var(--muted); }
+  .arch figcaption b { color: var(--fg); font-weight: 600; }
+
+  .start { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin: 24px 0 8px;
+           padding: 18px 20px; border-radius: 8px; background: var(--panel);
+           border: 1px solid var(--border); border-left: 3px solid var(--accent); }
+  .start div { flex: 1 1 320px; }
+  .start strong { display: block; font-size: 17px; }
+  .start span { color: var(--muted); font-size: 14px; }
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 9px 16px; border-radius: 6px;
+         background: var(--accent); color: var(--accent-fg); text-decoration: none; font-weight: 600; }
+  .btn:hover { filter: brightness(1.06); }
+  .btn:focus-visible, .card a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  section { margin-top: 32px; }
+  section > h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+                 margin: 0 0 10px; font-weight: 600; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+  .card { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 14px 16px;
+          background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+  .card:hover { border-color: var(--muted); }
+  .card .top { display: flex; align-items: center; gap: 8px; }
+  .card a { color: var(--fg); font-weight: 600; text-decoration: none; }
+  /* The whole card is the link's hit target. */
+  .card a::after { content: ""; position: absolute; inset: 0; border-radius: 8px; }
+  .card p { margin: 0; color: var(--muted); font-size: 14px; }
+  .card .meta { margin-top: auto; padding-top: 6px; display: flex; flex-wrap: wrap; gap: 4px 12px;
+                font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .lab { font-size: 11px; padding: 1px 7px; border-radius: 10px; background: var(--tint);
+         color: var(--muted); white-space: nowrap; margin-left: auto; }
+
+  /* Reachability: a dot plus a word, so it never relies on colour alone. */
+  .status { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
+  .status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--border); }
+  .status.up::before { background: var(--ok); }
+  .status.down::before { background: var(--err); }
+
+  /* The lab list. */
+  ol.labs { list-style: none; counter-reset: lab 0; margin: 0; padding: 0; display: grid; gap: 8px; }
+  ol.labs li { counter-increment: lab; position: relative; padding: 12px 16px 12px 52px;
+               background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+  ol.labs li::before { content: "Lab " counter(lab); position: absolute; left: 14px; top: 12px;
+                       font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  ol.labs b { display: block; font-size: 15px; }
+  ol.labs span { color: var(--muted); font-size: 14px; }
+  ol.labs code { font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border);
+          border-radius: 8px; overflow: hidden; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  th { font-weight: 600; color: var(--muted); font-size: 13px; background: var(--tint); }
+  td code { font-family: var(--mono); font-size: 13px; }
+  .scroll { overflow-x: auto; }
+  /* The table-structure panel. */
+  #tinfo { width: min(760px, calc(100vw - 32px)); max-height: min(86vh, 900px); padding: 0;
+           border: 1px solid var(--border); border-radius: 10px; background: var(--panel); color: var(--fg);
+           box-shadow: 0 12px 48px rgba(0,0,0,.35); }
+  #tinfo[open] { display: flex; flex-direction: column; }
+  #tinfo::backdrop { background: rgba(10, 12, 16, .55); }
+  #tinfo .hd { display: flex; align-items: flex-start; gap: 12px; padding: 14px 18px 12px;
+               border-bottom: 1px solid var(--border); }
+  #tinfo .hd div { flex: 1; min-width: 0; }
+  #tinfo h2 { margin: 0; font-size: 17px; font-family: var(--mono); word-break: break-all; }
+  #tinfo .kind { display: inline-block; margin-top: 4px; font-size: 12px; color: var(--muted); }
+  #tinfo .close { flex: none; width: 30px; height: 30px; padding: 0; border-radius: 6px; cursor: pointer;
+                  border: 1px solid var(--border); background: var(--panel); color: var(--fg); font-size: 14px; }
+  #tinfo .bd { overflow: auto; padding: 14px 18px 18px; }
+  #tinfo .bd > p { margin: 0 0 14px; color: var(--muted); font-size: 14px; }
+  #tinfo h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+              margin: 16px 0 6px; font-weight: 600; }
+  #tinfo table { font-size: 13px; }
+  #tinfo td:first-child, #tinfo td:nth-child(2) { font-family: var(--mono); font-size: 12.5px; white-space: nowrap; }
+  #tinfo dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; font-size: 14px; }
+  #tinfo dt { color: var(--muted); }
+  #tinfo dd { margin: 0; }
+  #tinfo code { font-family: var(--mono); font-size: 12.5px; }
+  #tinfo pre { margin: 0; padding: 10px 12px; background: var(--tint); border-radius: 6px; overflow: auto;
+               font-family: var(--mono); font-size: 12.5px; line-height: 1.5; }
+  #tinfo .qhd { display: flex; align-items: center; justify-content: space-between; }
+  #tinfo .copy { font: inherit; font-size: 12px; padding: 2px 10px; border-radius: 6px; cursor: pointer;
+                 border: 1px solid var(--border); background: var(--panel); color: var(--muted); }
+  footer { margin-top: 40px; color: var(--muted); font-size: 13px; }
+  footer code { font-family: var(--mono); }
+  @media (max-width: 600px) { header, main { padding-left: 16px; padding-right: 16px; } .intro h2 { font-size: 23px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Coffee Shop Lab</h1>
+  <span class="spacer"></span>
+  <button id="theme" type="button"></button>
+</header>
+
+<main>
+  <div class="intro">
+    <h2>Apache Flink 2.3 · streaming SQL and native AI</h2>
+    <p>A smoothie chain that is already trading: purchases and customer reviews stream into
+       Kafka, Flink SQL enriches and windows the sales into a report, and a second job hands
+       every bad review to an LLM with <code>ML_PREDICT</code>. Both land in PostgreSQL and
+       Grafana — and the generators keep producing while you work.</p>
+    <figure class="arch">
+      <div class="scroll">
+      <svg viewBox="0 0 1100 600" role="img"
+           aria-label="Architecture: purchases-gen and feedback-gen write JSON events to the Redpanda topics store.purchases and store.feedback. Flink job coffee-1-sales reads purchases, joins each one to the version of its product that was valid at purchase time, read from PostgreSQL warehouse.master_product with postgres-cdc, aggregates 30-second tumbling windows, and writes sales_report.purchase_report in PostgreSQL. Flink job coffee-2-feedback keeps reviews scoring below 6, calls an OpenAI-compatible LLM endpoint with ML_PREDICT, and writes sales_report.feedback_summary. Grafana reads both PostgreSQL tables.">
+        <defs>
+          <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path class="head" d="M0,0 L10,5 L0,10 z"/>
+          </marker>
+          <marker id="head-hot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path class="head-hot" d="M0,0 L10,5 L0,10 z"/>
+          </marker>
+        </defs>
+
+        <!-- Generators -->
+        <text class="region-label" x="140" y="30">GENERATORS</text>
+        <rect class="box" x="140" y="40" width="200" height="56" rx="6"/>
+        <text class="title" x="240" y="64" text-anchor="middle">purchases-gen</text>
+        <text class="sub" x="240" y="82" text-anchor="middle">1 sale / 5–20 s</text>
+        <rect class="box" x="620" y="40" width="200" height="56" rx="6"/>
+        <text class="title" x="720" y="64" text-anchor="middle">feedback-gen</text>
+        <text class="sub" x="720" y="82" text-anchor="middle">1 review / 5–15 s</text>
+        <line class="edge" x1="240" y1="96" x2="240" y2="160" marker-end="url(#head)"/>
+        <line class="edge" x1="720" y1="96" x2="720" y2="160" marker-end="url(#head)"/>
+        <text class="edge-label" x="250" y="122">JSON</text>
+        <text class="edge-label" x="730" y="122">JSON</text>
+
+        <!-- Kafka -->
+        <rect class="region" x="100" y="130" width="780" height="95" rx="10"/>
+        <text class="region-label" x="116" y="148">REDPANDA · KAFKA TOPICS</text>
+        <rect class="box" x="140" y="162" width="200" height="48" rx="6"/>
+        <text class="title" x="240" y="182" text-anchor="middle">store.purchases</text>
+        <text class="sub" x="240" y="198" text-anchor="middle">purchase_stream</text>
+        <rect class="box" x="620" y="162" width="200" height="48" rx="6"/>
+        <text class="title" x="720" y="182" text-anchor="middle">store.feedback</text>
+        <text class="sub" x="720" y="198" text-anchor="middle">feedback</text>
+        <line class="edge" x1="240" y1="210" x2="240" y2="284" marker-end="url(#head)"/>
+        <line class="edge" x1="720" y1="210" x2="720" y2="284" marker-end="url(#head)"/>
+
+        <!-- Flink -->
+        <rect class="region" x="100" y="250" width="780" height="120" rx="10"/>
+        <text class="region-label" x="116" y="268">FLINK 2.3 · STREAMING SQL JOBS</text>
+        <rect class="box" x="120" y="286" width="240" height="64" rx="6"/>
+        <text class="title" x="240" y="312" text-anchor="middle">Job 1 · coffee-1-sales</text>
+        <text class="sub" x="240" y="330" text-anchor="middle">temporal join · TUMBLE 30 s</text>
+        <rect class="box" x="600" y="286" width="240" height="64" rx="6"/>
+        <text class="title" x="720" y="312" text-anchor="middle">Job 2 · coffee-2-feedback</text>
+        <text class="sub" x="720" y="330" text-anchor="middle">score &lt; 6 · ML_PREDICT</text>
+
+        <!-- The product dimension: PostgreSQL, streamed in with postgres-cdc -->
+        <rect class="box" x="420" y="290" width="150" height="56" rx="6"/>
+        <text class="title" x="495" y="313" text-anchor="middle">master_product</text>
+        <text class="sub" x="495" y="330" text-anchor="middle">PostgreSQL · CDC</text>
+        <line class="edge" x1="418" y1="318" x2="362" y2="318" marker-end="url(#head)"/>
+        <text class="edge-label" x="390" y="310" text-anchor="middle">versions</text>
+
+        <!-- The model call: the stage that costs money and leaves the cluster -->
+        <rect class="box hot-box" x="920" y="286" width="160" height="64" rx="6"/>
+        <text class="title" x="1000" y="312" text-anchor="middle">LLM endpoint</text>
+        <text class="sub" x="1000" y="330" text-anchor="middle">OpenAI-compatible</text>
+        <line class="edge hot" x1="842" y1="318" x2="918" y2="318" marker-start="url(#head-hot)" marker-end="url(#head-hot)"/>
+        <text class="edge-label hot-label" x="880" y="306" text-anchor="middle">one call</text>
+        <text class="edge-label hot-label" x="880" y="338" text-anchor="middle">per review</text>
+
+        <!-- Sinks -->
+        <line class="edge" x1="240" y1="350" x2="240" y2="430" marker-end="url(#head)"/>
+        <text class="edge-label" x="250" y="390">INSERT INTO dwh.sales_report.purchase_report</text>
+        <line class="edge" x1="720" y1="350" x2="720" y2="430" marker-end="url(#head)"/>
+        <text class="edge-label" x="730" y="390">INSERT INTO feedback_summary_sink</text>
+
+        <rect class="region" x="100" y="400" width="780" height="105" rx="10"/>
+        <text class="region-label" x="116" y="418">POSTGRESQL · sales_report — the dwh catalog</text>
+        <rect class="box" x="140" y="432" width="200" height="48" rx="6"/>
+        <text class="title" x="240" y="452" text-anchor="middle">purchase_report</text>
+        <text class="sub" x="240" y="468" text-anchor="middle">30 s windows</text>
+        <rect class="box" x="620" y="432" width="200" height="48" rx="6"/>
+        <text class="title" x="720" y="452" text-anchor="middle">feedback_summary</text>
+        <text class="sub" x="720" y="468" text-anchor="middle">summary + 2 fixes</text>
+
+        <!-- Dashboards: centred below the two tables they read -->
+        <rect class="box" x="400" y="530" width="160" height="48" rx="6"/>
+        <text class="title" x="480" y="550" text-anchor="middle">Grafana</text>
+        <text class="sub" x="480" y="566" text-anchor="middle">2 dashboards</text>
+        <polyline class="edge" points="240,480 240,554 398,554" marker-end="url(#head)"/>
+        <polyline class="edge" points="720,480 720,554 562,554" marker-end="url(#head)"/>
+
+        <!-- Clickable tables: the (i) badge and the whole box open the structure panel -->
+        <g class="tbl" data-table="purchase_stream" tabindex="0" role="button" aria-haspopup="dialog" aria-label="Show the structure of the purchase_stream table">
+          <rect class="hit" x="140" y="162" width="200" height="48" rx="6"/>
+          <g class="badge"><circle cx="329" cy="173" r="8"/><text x="329" y="176.5" text-anchor="middle">i</text></g>
+        </g>
+        <g class="tbl" data-table="feedback" tabindex="0" role="button" aria-haspopup="dialog" aria-label="Show the structure of the feedback table">
+          <rect class="hit" x="620" y="162" width="200" height="48" rx="6"/>
+          <g class="badge"><circle cx="809" cy="173" r="8"/><text x="809" y="176.5" text-anchor="middle">i</text></g>
+        </g>
+        <g class="tbl" data-table="master_product" tabindex="0" role="button" aria-haspopup="dialog" aria-label="Show the structure of the master_product table">
+          <rect class="hit" x="420" y="290" width="150" height="56" rx="6"/>
+          <g class="badge"><circle cx="559" cy="301" r="8"/><text x="559" y="304.5" text-anchor="middle">i</text></g>
+        </g>
+        <g class="tbl" data-table="purchase_report" tabindex="0" role="button" aria-haspopup="dialog" aria-label="Show the structure of the purchase_report table">
+          <rect class="hit" x="140" y="432" width="200" height="48" rx="6"/>
+          <g class="badge"><circle cx="329" cy="443" r="8"/><text x="329" y="446.5" text-anchor="middle">i</text></g>
+        </g>
+        <g class="tbl" data-table="feedback_summary" tabindex="0" role="button" aria-haspopup="dialog" aria-label="Show the structure of the feedback_summary table">
+          <rect class="hit" x="620" y="432" width="200" height="48" rx="6"/>
+          <g class="badge"><circle cx="809" cy="443" r="8"/><text x="809" y="446.5" text-anchor="middle">i</text></g>
+        </g>
+      </svg>
+      </div>
+      <figcaption>
+        Two independent jobs. <b>Job 1 never leaves the cluster</b> — Kafka, a CDC stream of
+        product versions, a window, PostgreSQL — so the sales dashboard keeps updating whatever the
+        model is doing. <b>Job 2 is the one that costs money</b>: one LLM call per bad
+        review, against someone else's endpoint. Stop it, restart it or point it at another
+        model and job 1 never notices. Click a table's ⓘ for its columns and a query to try.
+      </figcaption>
+    </figure>
+  </div>
+
+  <div class="start">
+    <div>
+      <strong>Start here: the web SQL editor</strong>
+      <span>Flink SQL in the browser. Load the DDL files from the examples menu first, then run the queries — your session survives a reload.</span>
+    </div>
+    <a class="btn" data-port="8084" data-path="/" href="#">Open the SQL editor →</a>
+    <a class="btn" data-port="8084" data-path="/pipeline" href="#">Interactive pipeline →</a>
+  </div>
+
+  <section>
+    <h3>The labs</h3>
+    <ol class="labs">
+      <li><b>Look at the sources</b>
+          <span>Declare the Kafka and CDC tables, then read the raw purchase stream and watch a product edit in PostgreSQL arrive live. <code>flink_sql/ddl/01_sources.sql</code>, <code>flink_sql/explore.sql</code></span></li>
+      <li><b>Enrich and window the stream</b>
+          <span>An event-time temporal join <code>FOR SYSTEM_TIME AS OF transaction_time</code>, then <code>TUMBLE</code> and <code>HOP</code> windows, building up to the shape of the sales report. <code>flink_sql/explore.sql</code></span></li>
+      <li><b>Write the sales report to PostgreSQL</b>
+          <span>Register the <code>dwh</code> JDBC catalog and run job 1 straight into <code>dwh.sales_report.purchase_report</code>; watch the Grafana sales dashboard fill. <code>flink_sql/jobs/10_sales.sql</code></span></li>
+      <li><b>Summarise bad reviews with an LLM</b>
+          <span><code>CREATE MODEL</code>, an ad hoc <code>ML_PREDICT</code>, then job 2: filter, model call, parse, sink. Needs <code>OPENAI_API_KEY</code>. <code>flink_sql/ddl/02_models.sql</code>, <code>flink_sql/jobs/20_feedback.sql</code></span></li>
+    </ol>
+  </section>
+
+  <section>
+    <h3>Run the labs</h3>
+    <div class="grid">
+      <div class="card" data-port="8084">
+        <div class="top"><a data-port="8084" data-path="/" href="#">SQL Editor</a><span class="lab">Labs 1–4</span></div>
+        <p>Run Flink SQL against the SQL Gateway. Streaming results stay live until you cancel them.</p>
+        <div class="meta"><span class="status">checking</span><span class="addr"></span></div>
+      </div>
+      <div class="card" data-port="8081">
+        <div class="top"><a data-port="8081" data-path="/" href="#">Flink Web UI</a><span class="lab">Labs 1–4</span></div>
+        <p>Running jobs, their plans, checkpoints and back pressure. Stop a job here.</p>
+        <div class="meta"><span class="status">checking</span><span class="addr"></span></div>
+      </div>
+      <div class="card" data-port="8084">
+        <div class="top"><a data-port="8084" data-path="/pipeline" href="#">Pipeline Builder</a><span class="lab">Labs 1–4</span></div>
+        <p>The architecture diagram as buttons: create each table, deploy each job, watch the boxes go live. Optional guided mode.</p>
+        <div class="meta"><span class="status">checking</span><span class="addr"></span></div>
+      </div>
+      <div class="card" data-port="3000">
+        <div class="top"><a data-port="3000" data-path="/dashboards" href="#">Grafana</a><span class="lab">Labs 3–4</span></div>
+        <p>The sales report and the customer-feedback dashboards, provisioned. No login.</p>
+        <div class="meta"><span class="status">checking</span><span class="addr"></span></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h3>Look underneath</h3>
+    <div class="grid">
+      <div class="card" data-port="8082">
+        <div class="top"><a data-port="8082" data-path="/topics" href="#">Redpanda Console</a><span class="lab">Lab 1</span></div>
+        <p>The raw events in <code>store.purchases</code> and <code>store.feedback</code>, and the consumer groups the jobs create.</p>
+        <div class="meta"><span class="status">checking</span><span class="addr"></span></div>
+      </div>
+      <div class="card" data-port="8083">
+        <div class="top"><a data-port="8083" data-path="/v1/info" href="#">Flink SQL Gateway</a><span class="lab">REST</span></div>
+        <p>The engine behind the SQL editor, exposed as a REST API. No UI — this link returns its version.</p>
+        <div class="meta"><span class="status">checking</span><span class="addr"></span></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h3>Connection details</h3>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Endpoint</th><th>From your machine</th><th>Inside the lab network</th><th>Credentials</th></tr></thead>
+        <tbody>
+          <tr><td>Kafka (Redpanda)</td><td><code class="host" data-port="19092"></code></td><td><code>redpanda:9092</code></td><td>none</td></tr>
+          <tr><td>PostgreSQL — reports</td><td><code class="host" data-port="5432" data-scheme="jdbc:postgresql://" data-suffix="/sales_report"></code></td><td><code>postgres:5432</code></td><td><code>root</code> / <code>admin1</code>; db <code>sales_report</code></td></tr>
+          <tr><td>PostgreSQL — products</td><td><code class="host" data-port="5432" data-scheme="jdbc:postgresql://" data-suffix="/warehouse"></code></td><td><code>postgres:5432</code></td><td><code>root</code> / <code>admin1</code>; db <code>warehouse</code></td></tr>
+          <tr><td>Flink SQL Gateway</td><td><code class="host" data-port="8083" data-scheme="http://"></code></td><td><code>http://sql-gateway:8083</code></td><td>none</td></tr>
+          <tr><td>Flink REST / Web UI</td><td><code class="host" data-port="8081" data-scheme="http://"></code></td><td><code>http://jobmanager:8081</code></td><td>none</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <dialog id="tinfo" aria-labelledby="tinfoTitle">
+    <div class="hd">
+      <div><h2 id="tinfoTitle"></h2><span class="kind" id="tinfoKind"></span></div>
+      <button type="button" class="close" id="tinfoClose" aria-label="Close">✕</button>
+    </div>
+    <div class="bd" id="tinfoBody"></div>
+  </dialog>
+
+  <footer>
+    The instructor notes are <code>GUIDE.md</code> in the scenario folder; the lab queries
+    are in <code>flink_sql/</code>. Status dots check every 15 seconds whether each web UI
+    answers.
+  </footer>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const host = location.hostname || "localhost";
+const url = (port, path = "/") => `http://${host}:${port}${path}`;
+
+// Every link and address is built from the host this page was opened on, so the same
+// page works on localhost and on a remote lab VM.
+document.querySelectorAll("a[data-port]").forEach(a => {
+  a.href = url(a.dataset.port, a.dataset.path);
+  a.target = "_blank"; a.rel = "noopener";
+});
+document.querySelectorAll(".card[data-port]").forEach(c => {
+  c.querySelector(".addr").textContent = `${host}:${c.dataset.port}`;
+});
+document.querySelectorAll("code.host").forEach(c => {
+  const { port, suffix = "", scheme = "" } = c.dataset;
+  c.textContent = `${scheme}${host}:${port}${suffix}`;
+});
+
+// Reachability. The UIs are on other origins and send no CORS headers, so the response
+// is opaque — but an opaque answer still proves the port is serving, while a refused
+// connection or a timeout rejects the fetch.
+async function probe(card) {
+  const s = card.querySelector(".status");
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 4000);
+  try {
+    await fetch(url(card.dataset.port), { mode: "no-cors", cache: "no-store", signal: ctl.signal });
+    s.className = "status up"; s.textContent = "up";
+  } catch {
+    s.className = "status down"; s.textContent = "not reachable";
+  } finally { clearTimeout(timer); }
+}
+const probeAll = () => document.querySelectorAll(".card[data-port]").forEach(probe);
+probeAll();
+setInterval(probeAll, 15000);
+
+// ── Table structure panels ────────────────────────────────────────────────────
+// Kept in step with the schemas by hand: flink_sql/ddl/01_sources.sql and the
+// pg_*.sql init files. Columns are [name, type, note]; a fourth truthy
+// element marks a primary-key column.
+const TABLES = {
+  purchase_stream: {
+    name: "purchase_stream", kind: "Flink table · kafka connector · topic store.purchases · JSON",
+    about: "One row per line item sold, produced by purchases-gen every 5–20 seconds. Exists only inside your Flink session — it is a definition over the topic, not a copy of it.",
+    cols: [
+      ["transaction_time", "TIMESTAMP(3)", "event time — the rowtime attribute"],
+      ["transaction_id", "STRING", ""],
+      ["product_id", "STRING", "CS01 … — joins master_product"],
+      ["price", "FLOAT", ""],
+      ["quantity", "INT", ""],
+      ["state", "STRING", "US state of the store"],
+      ["is_member", "BOOLEAN", "smoothie-club member"],
+      ["member_discount", "FLOAT", "10 % for members"],
+      ["add_supplements", "BOOLEAN", ""],
+      ["supplement_price", "FLOAT", "1.99 when added"],
+      ["total_purchase", "FLOAT", ""],
+    ],
+    facts: [
+      ["Watermark", "<code>transaction_time - INTERVAL '1' SECOND</code>"],
+      ["One clock", "<code>transaction_time</code> both windows the report and picks which version of each product a purchase is joined to"],
+      ["Starts from", "<code>earliest-offset</code>, so every new query replays the whole topic"],
+      ["Read by", "job 1, <code>coffee-1-sales</code>"],
+      ["Lab step", "Labs 1–3"],
+    ],
+    query: "SELECT transaction_time, product_id, quantity, state, total_purchase\nFROM purchase_stream;",
+  },
+  feedback: {
+    name: "feedback", kind: "Flink table · kafka connector · topic store.feedback · JSON",
+    about: "One customer review every 5–15 seconds. Roughly one in five scores below 6 — those, and only those, are sent to the model. Product name and category are denormalised into each event, so the prompt needs no join.",
+    cols: [
+      ["review_id", "STRING", ""],
+      ["transaction_id", "STRING", ""],
+      ["customer_id", "STRING", ""],
+      ["store_state", "STRING", ""],
+      ["product_name", "STRING", ""],
+      ["product_category", "STRING", ""],
+      ["overall_score", "INT", "1 – 10; job 2 keeps < 6"],
+      ["product_quality", "INT", "1 – 10"],
+      ["service_speed", "INT", "1 – 10"],
+      ["staff_friendliness", "INT", "1 – 10"],
+      ["cleanliness", "INT", "1 – 10"],
+      ["value_for_money", "INT", "1 – 10"],
+      ["review_text", "STRING", "free text — what the model reads"],
+      ["visit_type", "STRING", ""],
+      ["would_return", "BOOLEAN", ""],
+      ["event_time", "STRING", "yyyy-MM-dd HH:mm:ss.SSS"],
+      ["event_ts", "TIMESTAMP(3)", "computed: TO_TIMESTAMP(event_time)"],
+    ],
+    facts: [
+      ["Watermark", "<code>event_ts - INTERVAL '5' SECOND</code>"],
+      ["Read by", "job 2, <code>coffee-2-feedback</code>"],
+      ["Lab step", "Lab 4"],
+    ],
+    query: "SELECT review_id, overall_score, product_name, review_text\nFROM feedback\nWHERE overall_score < 6;",
+  },
+  master_product: {
+    name: "master_product", kind: "Flink table · postgres-cdc connector · PostgreSQL warehouse.master_product · versioned",
+    about: "The product dimension: 27 smoothies with their names, categories, cost and price. Read once as a snapshot, then followed through PostgreSQL's logical-replication stream, so every edit arrives within a second. The primary key and the watermark on update_time make it a versioned table: job 1 joins each purchase to the product row that was valid at its transaction_time.",
+    cols: [
+      ["product_id", "STRING", "", true],
+      ["category", "STRING", "Classic Smoothies, …"],
+      ["item", "STRING", "the name shown in the report"],
+      ["size", "STRING", ""],
+      ["cogs", "DECIMAL(10,2)", "cost of goods sold"],
+      ["price", "DECIMAL(10,2)", ""],
+      ["inventory_level", "INT", ""],
+      ["contains_fruit", "BOOLEAN", ""],
+      ["contains_veggies", "BOOLEAN", ""],
+      ["contains_nuts", "BOOLEAN", ""],
+      ["contains_caffeine", "BOOLEAN", ""],
+      ["op_ts", "TIMESTAMP_LTZ(3)", "metadata: commit time of the change; 0 for snapshot rows"],
+      ["update_time", "TIMESTAMP(3)", "computed: op_ts — the version's valid-from, and the watermark"],
+    ],
+    facts: [
+      ["Versions", "a purchase before a price change keeps the old price, one after gets the new — a window straddling the change holds both"],
+      ["Idle timeout", "the watermark only moves when a product changes, so queries joining it need <code>SET 'table.exec.source.idle-timeout' = '5 s'</code> or the join waits forever"],
+      ["Replication slot", "one per running reader: interactive queries use <code>flink_master_product</code>, job 1 its own <code>coffee_sales</code>. Cancel one query before starting the next"],
+      ["Change it", "<code>docker compose exec postgres psql -U root -d warehouse</code>, then an <code>UPDATE master_product …</code>"],
+      ["Lab step", "Labs 1–3"],
+    ],
+    query: "SELECT product_id, item, category, price, update_time\nFROM master_product;\n-- leave it running, then in a terminal:\n--   UPDATE master_product SET price = 9.99 WHERE product_id = 'CS01';",
+  },
+  purchase_report: {
+    name: "dwh.sales_report.purchase_report", kind: "PostgreSQL table · reached through the dwh JDBC catalog",
+    about: "The sales report: one row per item × category × state × 30-second window. Not declared in Flink at all — the dwh catalog reflects it from PostgreSQL, primary key included, which is what makes job 1 an upsert sink.",
+    cols: [
+      ["dim_item", "VARCHAR(255)", "", true],
+      ["dim_category", "VARCHAR(255)", "", true],
+      ["dim_state", "VARCHAR(255)", "", true],
+      ["purchase_time", "TIMESTAMP(6)", "window_start", true],
+      ["fact_count_transactions", "DOUBLE", ""],
+      ["fact_sum_quantity", "DOUBLE", ""],
+      ["fact_sum_price", "DOUBLE", ""],
+      ["fact_sum_member_discount", "DOUBLE", ""],
+      ["fact_sum_supplement_price", "DOUBLE", ""],
+      ["fact_sum_total_purchase", "DOUBLE", ""],
+      ["fact_avg_total_purchase", "DOUBLE", ""],
+    ],
+    facts: [
+      ["Written by", "job 1, <code>flink_sql/jobs/10_sales.sql</code>"],
+      ["First rows", "after the first 30-second window closes"],
+      ["Survives", "the session: the <code>dwh</code> registration is persisted by the file CatalogStore, and the table lives in PostgreSQL"],
+      ["Read by", "the Grafana sales dashboard"],
+      ["Lab step", "Lab 3"],
+    ],
+    query: "SET 'execution.runtime-mode' = 'batch';\nSELECT dim_category, dim_state, SUM(fact_sum_total_purchase) AS sales\nFROM dwh.sales_report.purchase_report\nGROUP BY dim_category, dim_state;\nSET 'execution.runtime-mode' = 'streaming';",
+  },
+  feedback_summary: {
+    name: "dwh.sales_report.feedback_summary", kind: "PostgreSQL table · written through feedback_summary_sink",
+    about: "One row per bad review: the review itself, plus the model's one-line summary and two one-word improvements, parsed out of its 3-line reply with REGEXP_EXTRACT.",
+    cols: [
+      ["review_id", "VARCHAR(50)", "", true],
+      ["customer_id", "VARCHAR(50)", ""],
+      ["store_state", "VARCHAR(5)", ""],
+      ["product_name", "VARCHAR(100)", ""],
+      ["product_category", "VARCHAR(100)", ""],
+      ["overall_score", "INT", "always < 6"],
+      ["product_quality … value_for_money", "INT", "the five sub-scores"],
+      ["visit_type", "VARCHAR(20)", ""],
+      ["would_return", "BOOLEAN", ""],
+      ["review_text", "TEXT", ""],
+      ["summary", "TEXT", "model line 1"],
+      ["improvement_1", "TEXT", "model line 2 — one word"],
+      ["improvement_2", "TEXT", "model line 3 — one word"],
+      ["processed_at", "TIMESTAMP", ""],
+    ],
+    facts: [
+      ["Written by", "job 2, <code>flink_sql/jobs/20_feedback.sql</code>, via <code>ML_PREDICT(… MODEL ai_analyze_review …)</code>"],
+      ["Cost", "one chat completion per row"],
+      ["One word each", "the word cloud in the feedback dashboard splits the improvements on whitespace — that is why the prompt asks for single words"],
+      ["Lab step", "Lab 4"],
+    ],
+    query: "SET 'execution.runtime-mode' = 'batch';\nSELECT review_id, overall_score, summary, improvement_1, improvement_2\nFROM dwh.sales_report.feedback_summary\nORDER BY processed_at DESC LIMIT 10;\nSET 'execution.runtime-mode' = 'streaming';",
+  },
+};
+
+const esc = t => String(t).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+let lastTrigger = null;
+
+function openTable(key, trigger) {
+  const t = TABLES[key];
+  if (!t) return;
+  lastTrigger = trigger;
+  $("tinfoTitle").textContent = t.name;
+  $("tinfoKind").textContent = t.kind;
+  const rows = t.cols.map(([n, ty, note, pk]) =>
+    `<tr><td>${esc(n)}</td><td>${esc(ty)}${pk ? " <b>*</b>" : ""}</td><td>${esc(note || "")}</td></tr>`).join("");
+  const facts = t.facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("");
+  const hasPk = t.cols.some(c => c[3]);
+  $("tinfoBody").innerHTML = `
+    <p>${esc(t.about)}</p>
+    <h3>Columns (${t.cols.length})${hasPk ? " &middot; <b>*</b> primary key" : ""}</h3>
+    <div class="scroll"><table><thead><tr><th>Name</th><th>Type</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <h3>Key facts</h3><dl>${facts}</dl>
+    <div class="qhd"><h3>Try it in the SQL editor</h3><button type="button" class="copy">Copy</button></div>
+    <pre></pre>`;
+  $("tinfoBody").querySelector("pre").textContent = t.query;
+  $("tinfoBody").querySelector(".copy").onclick = async e => {
+    const btn = e.currentTarget;
+    try { await navigator.clipboard.writeText(t.query); }
+    catch {  // no clipboard API outside a secure context (e.g. http on a remote VM)
+      const ta = Object.assign(document.createElement("textarea"), { value: t.query });
+      document.body.append(ta); ta.select(); document.execCommand("copy"); ta.remove();
+    }
+    btn.textContent = "Copied"; setTimeout(() => btn.textContent = "Copy", 1200);
+  };
+  $("tinfo").showModal();
+  $("tinfoBody").scrollTop = 0;
+}
+document.querySelectorAll(".arch .tbl").forEach(g => {
+  g.addEventListener("click", () => openTable(g.dataset.table, g));
+  g.addEventListener("keydown", e => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openTable(g.dataset.table, g); }
+  });
+});
+$("tinfoClose").onclick = () => $("tinfo").close();
+// Back to the box that opened it, so keyboard users keep their place in the diagram.
+$("tinfo").addEventListener("close", () => lastTrigger && lastTrigger.focus());
+// A click on the backdrop lands on the <dialog> itself, outside its content box.
+$("tinfo").addEventListener("click", e => {
+  const r = $("tinfo").getBoundingClientRect();
+  if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) $("tinfo").close();
+});
+
+// Light/dark toggle — follow the OS until the first click, then remember the choice.
+const darkQuery = matchMedia("(prefers-color-scheme: dark)");
+const isDark = () => (document.documentElement.dataset.theme || (darkQuery.matches ? "dark" : "light")) === "dark";
+function paintTheme() {
+  const next = isDark() ? "light" : "dark";
+  $("theme").textContent = isDark() ? "☀" : "☾";
+  $("theme").title = `Switch to ${next} mode`;
+  $("theme").setAttribute("aria-label", `Switch to ${next} mode`);
+}
+$("theme").onclick = () => {
+  const t = isDark() ? "light" : "dark";
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem("home.theme", t); } catch {}
+  paintTheme();
+};
+darkQuery.addEventListener("change", paintTheme);
+paintTheme();
+</script>
+</body>
+</html>

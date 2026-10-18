@@ -1,0 +1,5 @@
+# Connector JARs are fetched by download-jars.sh
+lib/*.jar
+
+# Never commit the rendered environment — it carries the API key
+.env
