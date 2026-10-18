@@ -16,43 +16,7 @@ Everything the scenario needs lives in this directory (`datagen/`, `flink_sql/`,
 
 ## Architecture
 
-```
-  ┌───────────────┐        ┌──────────────────────────────────────────┐
-  │ purchases-gen │ ─────► │  store.purchases                         │
-  └───────────────┘        │                (Redpanda / Kafka)        │
-                           └──────────┬───────────────────────────────┘
-                                      │
-   PostgreSQL warehouse.master_product│  event-time temporal join
-   (postgres-cdc, versioned) ─────────┤  FOR SYSTEM_TIME AS OF transaction_time
-                                      ▼
-                        ┌─────────────────────────────┐
-                        │  Job 1: coffee-1-sales       │  TUMBLE 30s (windowing TVF)
-                        │  jobs/10_sales.sql          │  item × category × state
-                        └──────────────┬──────────────┘
-                                       ▼
-                        sales_report.purchase_report (PostgreSQL) ──► Grafana
-
-
-  ┌───────────────┐        ┌──────────────────────────┐
-  │ feedback-gen  │ ─────► │  store.feedback          │
-  └───────────────┘        └────────────┬─────────────┘
-                                        │
-                          ┌─────────────▼──────────────┐
-                          │  Job 2: coffee-2-feedback   │
-                          │  jobs/20_feedback.sql       │
-                          │                             │
-                          │  WHERE overall_score < 6     │
-                          │        │                     │
-                          │  CREATE MODEL ai_analyze_review
-                          │        │   (native Flink AI function,
-                          │        │    provider = openai)
-                          │  ML_PREDICT(...)             │
-                          │        │                     │
-                          │  REGEXP_EXTRACT × 3 → columns│
-                          └──────────────┬──────────────┘
-                                         ▼
-                        sales_report.feedback_summary (PostgreSQL) ──► Grafana
-```
+![](media/streaming_analytics_architecture.png)
 
 Two streaming jobs run continuously: **1** sales aggregation (no model, no external
 dependency), **2** review filter → `ML_PREDICT` → parsed summary. Splitting them means
